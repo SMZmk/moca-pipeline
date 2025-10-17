@@ -1,6 +1,20 @@
 # Ignore the results directory
 results/
 
+# Ignore all files in the data directory except for missing_directories
+data/*
+!data/missing_directories
+
+configs/*
+!config_arabidopsis.yaml
+!config_test_specialized.yaml
+!gernot_genes.txt
+!requirements.txt
+!specialized_genes.txt
+!configs/template_config_specialized.yaml
+
+.vscode/
+
 # Ignore Python cache files
 __pycache__/
 *.pyc
