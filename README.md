@@ -28,6 +28,7 @@ The pipeline is built in Python and designed to be modular, memory-efficient, an
 The project is organized into a clean, standard Python package structure.
 
 moca/
+```
 ├── configs/              # All .yaml configuration files and requirements.txt
 ├── data/                 # Input data (HDF5 models, reference genomes, etc.)
 ├── results/              # All output files, organized by run name
@@ -40,6 +41,7 @@ moca/
         ├── __init__.py
         ├── step1_nomenclature.py
         └── ... (all other step scripts)
+```
 
 ## Setup and Installation
 The pipeline uses a Conda environment to manage its dependencies.
