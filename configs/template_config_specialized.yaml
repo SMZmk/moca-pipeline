@@ -1,0 +1,75 @@
+# --- General Settings ---
+run_name: "Athal_pareto_front"
+analysis_type: "pre_extracted" 
+#change to "whole_genome"
+
+input_hdf5: "/home/gernot/Code/PhD_Code/moca_blue/moca_blue/0MOTIFS/MSR_ATHA_bvul_bole_csat_cqui_ccum_dcar_gmax_osat_slyc_sbic_zmay_M1X0.75dP7K25f_deepcre_motifs_250710_092300.hdf5"
+species_tag: "Test"
+model_tag: "T0"
+
+# This global setting tells all downstream steps to use the trimmed motif file.
+use_trimmed_motifs: true
+
+# --- Pipeline Steps ---
+# Set 'run: true' to execute a step, 'run: false' to skip it.
+
+nomenclature:
+  run: true
+  matrix_type: "CWM"
+  trim_motifs: true
+  trim_threshold: 0.25
+
+visualization:
+  run: true
+
+comparison:
+  run: true
+  min_overlap: 4
+  top_n_plots: 3
+  
+  # --- Local Database Configuration ---
+  # Path to the main directory where you unzipped the motif databases
+  local_db_path: "data/motif_databases.12.27/motif_databases"
+  
+  # List of the specific database subdirectories to compare against.
+  # The script will create separate results for each of these.
+  databases_to_compare:
+    - 'JASPAR'
+    - 'RNA'
+    - 'MIRBASE'
+    - 'ARABD'      
+
+importance:
+  run: true
+
+saliency:
+  run: true 
+  # saliency_scores_h5: "path/to/scores.h5"
+  # metadata_csv: "path/to/meta_info.csv"
+  # target_gene_id: "GENE_ID_TO_PLOT"
+
+clustering:
+  run: true
+  dendrogram_filter: "F_"   # Optional: only show forward motifs on the dendrogram
+
+ranging:
+  run: true
+
+projection:
+  run: true
+  blamm_executable: "/usr/local/bin/blamm"
+  reference_genome_fasta: "/home/gernot/Code/PhD_Code/moca_blue/moca_blue/ref_seq/orig_genomes/corrected_runs/arabidopsis_toolkit_msr_max_250806_153949_522568_pareto_fronts_deduplicated.fa"
+  reference_gff: "/home/gernot/Code/PhD_Code/moca_blue/moca_blue/ref_seq/orig_genomes/corrected_runs/arabidopsis_toolkit_msr_max_250806_153949_522568_pareto_fronts_deduplicated.gff3"
+  flank_size: 1000
+
+annotation:
+  run: true
+  reference_gff: "/home/gernot/Code/PhD_Code/moca_blue/moca_blue/ref_seq/orig_genomes/corrected_runs/arabidopsis_toolkit_msr_max_250806_153949_522568_pareto_fronts_deduplicated.gff3"
+
+browser_viz:
+  run: true
+  target_gene_list: "configs/gernot_genes.txt"
+
+  #prediction_probabilities_csv: "path/to/your/predictions.csv"
+  #true_expression_classes_csv: "path/to/your/expression_data.csv"
+  #functional_annotation_txt: "path/to/your/functional_annotation.txt"

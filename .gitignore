@@ -11,6 +11,7 @@ configs/*
 !gernot_genes.txt
 !requirements.txt
 !specialized_genes.txt
+!configs/template_config_specialized.yaml
 
 .vscode/
 

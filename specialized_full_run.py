@@ -26,7 +26,7 @@ def run_command(*args: str, output: bool = False) -> Optional[str]:
 def get_annotation(fasta_path: str) -> Tuple[str, str]:
     final_fasta_path = fasta_path
     gff_path = ""
-    output = run_command("python", "../moca_blue/moca_blue/ref_seq/create_annotation.py", "-f", fasta_path, output=True)
+    output = run_command("python", "scripts/create_annotation.py", "-f", fasta_path, output=True)
     if output is None:
         raise RuntimeError("really shouldnt come to this. run_command somehow didnt return output :(")
     lines = output.strip().split('\n')
@@ -61,7 +61,7 @@ def run_configs(config_path: str):
         fasta_path = config.pop("sequence_fasta")
         fasta_path, gff_path = get_annotation(fasta_path)
 
-        with open("configs/local_test_gernot.yaml", 'r') as f:
+        with open("configs/template_config_specialized.yaml", 'r') as f:
             template_config = yaml.safe_load(f)
         update_template_params(config, template_config)
         template_config["projection"]["reference_genome_fasta"] = fasta_path
