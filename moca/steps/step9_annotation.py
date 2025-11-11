@@ -138,17 +138,22 @@ def run(config, common_settings):
                 if occ_chunk.empty: continue
 
                 # FIX: Standardize the 'loc' column to match the GFF's merge_key format
-                # 1. Split 'loc' into its 'chr' and 'coordinate' parts
-                loc_parts = occ_chunk['loc'].str.split(':', n=1, expand=True)
+                # 1. Split 'loc' into its 'chr' and 'coordinate' parts
+                loc_parts = occ_chunk['loc'].str.split(':', n=1, expand=True)
                 
-                # 2. Standardize the 'chr' part (loc_parts[0]) using the same function as the GFF
-                standardized_chr = _standardize_chr_name(loc_parts[0])
+                # 2. Standardize the 'chr' part (loc_parts[0]) using the same function as the GFF
+                standardized_chr = _standardize_chr_name(loc_parts[0])
                 
-                # 3. Re-assemble the merge_key
-                occ_chunk['merge_key'] = standardized_chr + ':' + loc_parts[1]
-                # --- End Fix ---
+                # 3. Re-assemble the merge_key
+                #    Handle potential missing coordinate part (e.g., if a loc was bad)
+                if loc_parts.shape[1] > 1:
+                    occ_chunk['merge_key'] = standardized_chr + ':' + loc_parts[1]
+                else:
+                    # If there's no ':', the loc is invalid; set a key that won't match
+                    occ_chunk['merge_key'] = 'invalid_loc_format' 
+                # --- End Fix ---
                 
-                merged_chunk = pd.merge(occ_chunk, gene_annot_df, on='merge_key', how='inner')
+                merged_chunk = pd.merge(occ_chunk, gene_annot_df, on='merge_key', how='inner')
                 if merged_chunk.empty: continue
 
                 processed_chunks.append(merged_chunk)
