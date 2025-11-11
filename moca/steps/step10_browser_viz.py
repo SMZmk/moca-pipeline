@@ -441,8 +441,14 @@ def run(config, common_settings):
         print(f"Loading features for {target_gene_id} from GFF...")
         gff_df = _load_gff(ref_gff_file)
         
+        # --- This is the FIXED code ---
+        # Normalize BOTH potential ID columns
         gff_df['gene_id_attr_norm'] = _normalize_gene_id(gff_df['gene_id_attr'])
-        gene_info = gff_df[(gff_df['gene_id_attr_norm'] == target_gene_id) & (gff_df['type'] == 'gene')]
+        gff_df['id_norm'] = _normalize_gene_id(gff_df['id'])
+        
+        # Search in BOTH columns
+        is_target_gene = (gff_df['gene_id_attr_norm'] == target_gene_id) | (gff_df['id_norm'] == target_gene_id)
+        gene_info = gff_df[is_target_gene & (gff_df['type'] == 'gene')]
         
         if gene_info.empty:
             print(f"Error: Could not find gene '{target_gene_id}' in GFF file.")
