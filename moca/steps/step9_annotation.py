@@ -16,17 +16,46 @@ def _load_gff(filepath):
     """
     Loads a GFF/GTF file, parsing it into a pandas DataFrame.
     It specifically extracts the gene_id from the attributes column for annotation purposes.
+    Handles both GFF (key=value) and GTF (key "value") formats.
     """
     try:
         col_names = ['seqid', 'source', 'type', 'start', 'end', 'score', 'strand', 'phase', 'attributes']
         df = pd.read_csv(filepath, sep='\t', comment='#', header=None, names=col_names, low_memory=False)
         
-        df['gene_id'] = df['attributes'].str.extract(r'gene_id[= ]"([^"]+)"', expand=False)
-        if df['gene_id'].isnull().all():
-            print("Could not find 'gene_id' attribute, trying 'ID=...' format.")
-            df['gene_id'] = df['attributes'].str.extract(r'ID=([^;]+)', expand=False)
+        # --- Robust Gene ID Extraction Logic ---
+        gene_id_col = None
+
+        # 1. Try GFF3 format: ID=gene:xxxxx; or Parent=gene:xxxxx; (often used for 'gene' entries)
+        # Note: Your original code's GFF-like extraction seems to target 'gene_id="..."' which is more GTF/GFF-like
+        # I will keep the original GFF-like/GTF-like attempts but make them more specific.
+
+        # Try GTF format: gene_id "value";
+        gene_id_col = df['attributes'].str.extract(r'gene_id\s*\"([^\"]+)\"', expand=False)
         
+        # Try GFF-like format: gene_id=value; or ID=value;
+        if gene_id_col.isnull().all():
+            print("Could not find 'gene_id \"value\"' attribute. Trying GFF3-like 'gene_id=value;'...")
+            gene_id_col = df['attributes'].str.extract(r'gene_id=([^;]+)', expand=False)
+            
+        # Try GFF3 ID=... format (often for 'gene' or 'mRNA' types)
+        if gene_id_col.isnull().all():
+            print("Could not find 'gene_id' attribute. Trying GFF3 'ID=...' format...")
+            # Capture content until the next semi-colon
+            gene_id_col = df['attributes'].str.extract(r'ID=([^;]+)', expand=False)
+
+        # Try GFF3 Parent=... format (for features with a gene parent)
+        if gene_id_col.isnull().all():
+            print("Could not find 'ID=...' attribute. Trying GFF3 'Parent=gene:...' format...")
+            # This is less ideal for the 'gene' row itself, but good for children features.
+            gene_id_col = df['attributes'].str.extract(r'Parent=gene:([^;]+)', expand=False)
+            
+        # --- Final Assignment ---
+        df['gene_id'] = gene_id_col
         df['gene_id'] = df['gene_id'].fillna('N/A')
+        
+        if (df['gene_id'] == 'N/A').all():
+             print("\n🚨 **Critical Warning:** Gene ID extraction failed for ALL rows. The pipeline will likely fail later.")
+             
         return df
     except Exception as e:
         print(f"Error loading or parsing GFF/GTF file {filepath}: {e}")
@@ -35,7 +64,7 @@ def _load_gff(filepath):
 def save_filtered_results(df, output_dir, filter_name):
     """Saves a filtered DataFrame to specifically named CSV and BED files."""
     if df.empty:
-        print(f"Warning: No occurrences remained for filter '{filter_name}'. No output files will be generated for this filter.")
+        print(f"Warning: No occurrences remained for filter '{filter_name}'. No output files will be generated.")
         return
 
     # Handle potential column name conflict from merge.
@@ -45,6 +74,7 @@ def save_filtered_results(df, output_dir, filter_name):
     print(f"\nTotal occurrences after '{filter_name}' filter: {len(df)}")
     print(f"Generating output files for '{filter_name}'...")
 
+    # Ensure all required columns are present before saving
     final_cols = ['chr', 'gene_id', 'gene_start', 'gene_end', 'gene_strand', 'motif', 'gen_mstart', 'gen_mend', 'strand', 'score', 'region', 'dist_transc_border']
     final_df_csv = df[[col for col in final_cols if col in df.columns]]
 
@@ -70,15 +100,9 @@ def run(config, common_settings):
     ref_gff_file = config.get('reference_gff')
     chunk_size = config.get('chunk_size', 500000)
 
-    # --- FIXED VALUES based on the original R script's logic ---
-    EXTRACTION_FLANK_SIZE = 1000
-    FILTER_FLANK_SIZE = 1500
+    # This flank size MUST match the one used in the extraction step
+    EXTRACTION_FLANK_SIZE = 1000 
     
-    print(f"--- Using FIXED settings based on R script logic ---")
-    print(f"Merge Key Flank Size: {EXTRACTION_FLANK_SIZE}bp (for GFF coordinate calculation)")
-    print(f"Motif Filter Flank Size: {FILTER_FLANK_SIZE}bp (for pre-filtering from sequence ends)")
-    print(f"----------------------------------------------------")
-
     occurrence_files = sorted(glob.glob(os.path.join(projection_dir, 'occurrences_part_*')))
     species_tag = common_settings.get('species_tag', 'unk')
     model_tag = common_settings.get('model_tag', 'm0')
@@ -93,14 +117,15 @@ def run(config, common_settings):
     gene_annot_df = gene_annot_df[gene_annot_df['type'] == 'gene'].copy()
     gene_annot_df.rename(columns={'seqid': 'chr', 'start': 'gene_start', 'end': 'gene_end', 'strand': 'gene_strand'}, inplace=True)
     
+    # Create the merge key based on genomic coordinates, matching the occurrence file 'loc' column
     chr_std = _standardize_chr_name(gene_annot_df['chr'])
     start_flank = (gene_annot_df['gene_start'] - EXTRACTION_FLANK_SIZE).astype(str)
     end_flank = (gene_annot_df['gene_end'] + EXTRACTION_FLANK_SIZE).astype(str)
     gene_annot_df['merge_key'] = chr_std + ':' + start_flank + '-' + end_flank
     
-    # --- STAGE 1 & 2: Process occurrences in chunks to conserve memory ---
+    # --- STAGE 1: Process occurrences in chunks to conserve memory ---
     print("\nProcessing occurrence files in chunks...")
-    fully_processed_chunks = []
+    processed_chunks = []
     occ_col_names = ['loc', 'source', 'motif', 'mstart', 'mend', 'score', 'strand', 'pval', 'seq']
 
     for i, occ_file_part in enumerate(occurrence_files):
@@ -112,43 +137,34 @@ def run(config, common_settings):
             ), desc="Processing Chunks"):
                 if occ_chunk.empty: continue
 
-                # 1. Pre-filter the chunk immediately based on position within the extracted sequence
-                loc_parts = occ_chunk['loc'].str.extract(r'[^:]+:(\d+)-(\d+)')
-                seq_start = pd.to_numeric(loc_parts[0])
-                seq_end = pd.to_numeric(loc_parts[1])
-                seq_length = seq_end - seq_start
-
-                is_in_start_flank = occ_chunk['mstart'] <= FILTER_FLANK_SIZE
-                is_in_end_flank = (seq_length - occ_chunk['mstart']) <= FILTER_FLANK_SIZE
+                # FIX: No pre-filtering is done here. All motifs are processed.
+                # The annotation step will determine if a motif is intragenic or in a flank.
                 
-                filtered_chunk = occ_chunk[is_in_start_flank | is_in_end_flank].copy()
-                if filtered_chunk.empty: continue
-
-                # 2. Annotate the small, filtered chunk
-                filtered_chunk['merge_key'] = filtered_chunk['loc']
-                merged_chunk = pd.merge(filtered_chunk, gene_annot_df, on='merge_key', how='inner')
+                # Annotate the chunk by merging with GFF data
+                occ_chunk['merge_key'] = occ_chunk['loc']
+                merged_chunk = pd.merge(occ_chunk, gene_annot_df, on='merge_key', how='inner')
                 if merged_chunk.empty: continue
 
-                # 3. Add to list of processed chunks
-                fully_processed_chunks.append(merged_chunk)
+                processed_chunks.append(merged_chunk)
 
         except Exception as e:
             print(f"Error processing file {occ_file_part}: {e}")
 
-    if not fully_processed_chunks:
-        print("Warning: No matching motifs found after filtering and annotation.")
+    if not processed_chunks:
+        print("Warning: No matching motifs found after annotation. Check if 'loc' field in occurrence files matches GFF coordinates.")
         return
         
     # --- Assemble final DataFrame from processed chunks ---
-    merged_df = pd.concat(fully_processed_chunks, ignore_index=True)
-    print(f"\nSuccessfully processed all chunks. Total retained occurrences: {len(merged_df)}")
+    merged_df = pd.concat(processed_chunks, ignore_index=True)
+    print(f"\nSuccessfully processed all chunks. Total occurrences to be filtered: {len(merged_df)}")
 
-    # --- STAGE 3: Calculate Genomic Positions and Apply Final Filters ---
-    print("\nStage 3: Calculating genomic positions and applying final filters...")
+    # --- STAGE 2: Calculate Genomic Positions and Define Regions ---
+    print("\nStage 2: Calculating genomic positions and applying final filters...")
     flank_start_coord = merged_df['loc'].str.split(':').str[1].str.split('-').str[0].astype(int)
     merged_df['gen_mstart'] = flank_start_coord + merged_df['mstart'] - 1
     merged_df['gen_mend'] = flank_start_coord + merged_df['mend'] - 1
     
+    # Define regions based on absolute genomic coordinates
     is_upstream = merged_df['gen_mend'] < merged_df['gene_start']
     is_downstream = merged_df['gen_mstart'] > merged_df['gene_end']
     
@@ -156,45 +172,58 @@ def run(config, common_settings):
     choices = ['upstream', 'downstream']
     merged_df['region'] = np.select(conditions, choices, default='intragenic')
 
+    # Calculate distance to the nearest transcription border (TSS or TTS)
     dist_choices = [
-        merged_df['gene_start'] - merged_df['gen_mend'],
-        merged_df['gen_mstart'] - merged_df['gene_end']
+        merged_df['gene_start'] - merged_df['gen_mend'], # Upstream distance
+        merged_df['gen_mstart'] - merged_df['gene_end']   # Downstream distance
     ]
     merged_df['dist_transc_border'] = np.select(conditions, dist_choices, default=0)
 
+    # Correct regions for genes on the minus strand
     is_minus_strand = merged_df['gene_strand'] == '-'
     upstream_on_minus = (merged_df['region'] == 'upstream') & is_minus_strand
     downstream_on_minus = (merged_df['region'] == 'downstream') & is_minus_strand
     merged_df.loc[upstream_on_minus, 'region'] = 'downstream'
     merged_df.loc[downstream_on_minus, 'region'] = 'upstream'
     
+    # --- STAGE 3: Apply Positional Preference Filters ---
     try:
         tss_motifs = pd.read_csv(tss_ranges_file)
         tts_motifs = pd.read_csv(tts_ranges_file)
     except FileNotFoundError:
-        print(f"Error: Could not read ranging files. Aborting annotation as positional filtering cannot be performed.")
+        print(f"Error: Could not read ranging files. Aborting as positional filtering cannot be performed.")
         return
 
     merged_df['epm'] = merged_df['motif'].str.extract(r'(epm_.+?_p\d+m\d+)', expand=False)
     
+    # Separate data by region
     upstream_df = merged_df[merged_df['region'] == 'upstream'].copy()
     downstream_df = merged_df[merged_df['region'] == 'downstream'].copy()
+    intragenic_df = merged_df[merged_df['region'] == 'intragenic'].copy() # KEEP intragenic
+    
+    print(f"Found {len(upstream_df)} upstream, {len(downstream_df)} downstream, and {len(intragenic_df)} intragenic motifs.")
+
+    # Merge with positional preference data
     up_merged = pd.merge(upstream_df, tss_motifs, on='epm', how='left')
     down_merged = pd.merge(downstream_df, tts_motifs, on='epm', how='left')
     
     up_merged.dropna(subset=['min', 'max', 'q10', 'q90'], inplace=True)
     down_merged.dropna(subset=['min', 'max', 'q10', 'q90'], inplace=True)
 
+    # --- Apply 'minmax' filter and save ---
     print("\n--- Applying 'minmax' filter ---")
     up_filtered_minmax = up_merged[up_merged['dist_transc_border'].between(up_merged['min'], up_merged['max'])]
     down_filtered_minmax = down_merged[down_merged['dist_transc_border'].between(down_merged['min'], down_merged['max'])]
-    final_df_minmax = pd.concat([up_filtered_minmax, down_filtered_minmax], ignore_index=True)
+    # Combine filtered upstream/downstream motifs WITH ALL intragenic motifs
+    final_df_minmax = pd.concat([up_filtered_minmax, down_filtered_minmax, intragenic_df], ignore_index=True)
     save_filtered_results(final_df_minmax, output_dir, "minmax")
 
+    # --- Apply 'q1q9' filter and save ---
     print("\n--- Applying 'q1q9' filter ---")
     up_filtered_q1q9 = up_merged[up_merged['dist_transc_border'].between(up_merged['q10'], up_merged['q90'])]
     down_filtered_q1q9 = down_merged[down_merged['dist_transc_border'].between(down_merged['q10'], down_merged['q90'])]
-    final_df_q1q9 = pd.concat([up_filtered_q1q9, down_filtered_q1q9], ignore_index=True)
+    # Combine filtered upstream/downstream motifs WITH ALL intragenic motifs
+    final_df_q1q9 = pd.concat([up_filtered_q1q9, down_filtered_q1q9, intragenic_df], ignore_index=True)
     save_filtered_results(final_df_q1q9, output_dir, "q1q9")
 
     print("\nAnnotation step successfully completed.")
