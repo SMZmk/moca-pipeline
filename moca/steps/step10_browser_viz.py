@@ -372,6 +372,93 @@ def generate_html_report(data, output_path):
     """
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html_template)
+        
+def _infer_gene_features(feature_df, transcript, gene_strand):
+    """
+    Infers UTRs if only CDS features (and no 'exon' or 'UTR' features) are present.
+    
+    Args:
+        feature_df (pd.DataFrame): The original DataFrame of features for the transcript.
+        transcript (pd.Series): The pandas Series for the parent mRNA transcript.
+        gene_strand (str): The strand of the gene ('+' or '-').
+
+    Returns:
+        pd.DataFrame: A new DataFrame including the original and inferred features.
+    """
+    features_present = set(feature_df['type'].unique())
+
+    # This is the specific scenario we are targeting:
+    # Only 'CDS' is present, with no 'exon' or 'UTR' features to define the transcript's full extent.
+    is_only_cds = ('CDS' in features_present and
+                   'five_prime_UTR' not in features_present and
+                   'three_prime_UTR' not in features_present and
+                   'exon' not in features_present)
+    
+    if not is_only_cds:
+        # GFF is either complete, has 'exon' features (which are sufficient), or is empty.
+        # In any case, we don't infer and return the original features.
+        return feature_df
+
+    cds_features = feature_df[feature_df['type'] == 'CDS']
+    if cds_features.empty:
+        return feature_df
+
+    print("Inferring UTRs: Only CDS features found. Using transcript and CDS boundaries.")
+
+    inferred_features_list = []
+    transcript_start = int(transcript['start'])
+    transcript_end = int(transcript['end'])
+    
+    # Find the absolute min/max of all CDS segments
+    cds_min_start = cds_features['start'].min()
+    cds_max_end = cds_features['end'].max()
+
+    # Base dictionary for new features
+    base_dict = {
+        'seqid': transcript['seqid'],
+        'source': 'inferred',
+        'strand': gene_strand,
+        'score': '.', 'phase': '.', 'attributes': 'inferred=true',
+        'parent_id': transcript['id']
+        # Other columns will be aligned via pd.concat
+    }
+
+    if gene_strand == '+':
+        # 5' UTR
+        if transcript_start < cds_min_start:
+            utr5 = base_dict.copy()
+            utr5.update({'type': 'five_prime_UTR', 'start': transcript_start, 'end': cds_min_start - 1})
+            inferred_features_list.append(utr5)
+        # 3' UTR
+        if cds_max_end < transcript_end:
+            utr3 = base_dict.copy()
+            utr3.update({'type': 'three_prime_UTR', 'start': cds_max_end + 1, 'end': transcript_end})
+            inferred_features_list.append(utr3)
+    else: # strand == '-'
+        # 5' UTR (at the 'end' of the transcript coordinates)
+        if cds_max_end < transcript_end:
+            utr5 = base_dict.copy()
+            utr5.update({'type': 'five_prime_UTR', 'start': cds_max_end + 1, 'end': transcript_end})
+            inferred_features_list.append(utr5)
+        # 3' UTR (at the 'start' of the transcript coordinates)
+        if transcript_start < cds_min_start:
+            utr3 = base_dict.copy()
+            utr3.update({'type': 'three_prime_UTR', 'start': transcript_start, 'end': cds_min_start - 1})
+            inferred_features_list.append(utr3)
+    
+    if not inferred_features_list:
+        return feature_df # No inference was possible
+
+    inferred_df = pd.DataFrame(inferred_features_list)
+    
+    # Align columns for concatenation, filling missing with NaN
+    all_cols = set(feature_df.columns) | set(inferred_df.columns)
+    
+    feature_df_aligned = feature_df.reindex(columns=all_cols)
+    inferred_df_aligned = inferred_df.reindex(columns=all_cols)
+
+    # Combine original features with new inferred features
+    return pd.concat([feature_df_aligned, inferred_df_aligned], ignore_index=True)
 
 def run(config, common_settings):
     """
@@ -479,9 +566,47 @@ def run(config, common_settings):
             
             print(f"Found {len(all_transcripts)} transcript(s). Using the longest, '{selected_transcript_id}', for visualization.")
             
-            feature_types = ['exon', 'CDS', 'five_prime_UTR', 'three_prime_UTR']
-            feature_info = gff_df[(gff_df['parent_id'] == selected_transcript_id) & (gff_df['type'].isin(feature_types))]
-            print(f"Found {len(feature_info)} features (Exons, CDS, UTRs) for this transcript.")
+            
+            # --- V V V --- CORRECTED FEATURE LOADING LOGIC --- V V V ---
+            
+            # Define all possible feature types we care about
+            all_feature_types = ['exon', 'CDS', 'five_prime_UTR', 'three_prime_UTR']
+            
+            # Load ALL of them for the selected transcript
+            all_features_df = gff_df[
+                (gff_df['parent_id'] == selected_transcript_id) & 
+                (gff_df['type'].isin(all_feature_types))
+            ].copy()
+            
+            print(f"Found {len(all_features_df)} total base features (Exon, CDS, UTRs) for this transcript.")
+
+            # Get the set of feature types that are *actually* present
+            features_present = set(all_features_df['type'].unique())
+
+            if 'CDS' in features_present or 'five_prime_UTR' in features_present or 'three_prime_UTR' in features_present:
+                # Case 1 (Your GFF) & Case 3 (CDS-only):
+                # Prioritize CDS/UTR. Filter out any 'exon' entries to prevent overlap.
+                feature_info = all_features_df[all_features_df['type'] != 'exon'].copy()
+                print(f"Prioritizing CDS/UTR features. Using {len(feature_info)} features for filtering.")
+                
+                # Now, run the inference function.
+                # If UTRs were present (Case 1), it will do nothing.
+                # If only CDS was present (Case 3), it will add the inferred UTRs.
+                feature_info = _infer_gene_features(feature_info, longest_transcript, gene_strand)
+                print(f"Using {len(feature_info)} features (including inferred, if any) for visualization.")
+
+            elif 'exon' in features_present:
+                # Case 2: Only 'exon' features are present. Use them.
+                feature_info = all_features_df.copy()
+                print(f"Only 'exon' features found. Using {len(feature_info)} 'exon' features for visualization.")
+            
+            else:
+                # No relevant features found
+                feature_info = pd.DataFrame(columns=all_features_df.columns) # Empty dataframe
+                print("No 'exon', 'CDS', or 'UTR' features found for this transcript.")
+            
+            # --- ^ ^ ^ --- END OF CORRECTED LOGIC --- ^ ^ ^ ---
+
 
         # --- 4. Prepare Data for Visualization and Table ---
         target_motifs_df.sort_values('gen_mstart', inplace=True)
@@ -527,9 +652,10 @@ def run(config, common_settings):
         
         target_motifs_df['color'] = target_motifs_df['motif'].map(color_map)
 
-        print(f"Filtering motifs for visualization to match gene strand ('{gene_strand}')...")
-        viz_motifs_df = target_motifs_df[target_motifs_df['strand'] == gene_strand].copy()
-        print(f"Visualizing {len(viz_motifs_df)} of {len(target_motifs_df)} total motifs.")
+        # --- V V V --- CHANGE 1: SHOW ALL MOTIFS --- V V V ---
+        print(f"Preparing all {len(target_motifs_df)} motifs for visualization (regardless of strand)...")
+        viz_motifs_df = target_motifs_df.copy()
+        # --- ^ ^ ^ --- END OF CHANGE 1 --- ^ ^ ^ ---
 
         # --- 5. Assemble data into a JSON-compatible dictionary ---
         db_names = [d.name for d in Path(comparison_dir).iterdir() if d.is_dir()] if os.path.exists(comparison_dir) else []
@@ -552,10 +678,11 @@ def run(config, common_settings):
             'max_track': int(viz_motifs_df['track'].max()) if not viz_motifs_df.empty and 'track' in viz_motifs_df.columns else 0,
             'total_motifs': len(target_motifs_df),
             'db_names': db_names,
-            'motifs_table': []
+            'motifs_table': [] # This will be populated below
         }
 
-        # Create the detailed table data
+        # --- 6. Create the detailed table data (pre-filtering) ---
+        preliminary_motifs_table = []
         for _, row in target_motifs_df.iterrows():
             motif_id = row['motif']
             is_reverse = 'R_' in motif_id
@@ -582,19 +709,54 @@ def run(config, common_settings):
             deepcre_pos_val = _get_deepcre_pos(motif_midpoint, tss_pos, tts_pos, gene_strand)
             deepcre_pos_str = f"{deepcre_pos_val:.0f}" if deepcre_pos_val is not None else "N/A"
 
-            report_data['motifs_table'].append({
-                'id': motif_id,
-                'logo_fwd': fwd_logo_for_display,
-                'logo_rev': rev_logo_for_display,
-                'range_plot': image_to_base64(range_plot_path),
-                'importance': importance_score,
-                'position': f"{row['gen_mstart']}-{row['gen_mend']}",
-                'deepcre_pos': deepcre_pos_str,
-                'strand': row['strand'],
-                'matches': matches
-            })
+            # --- V V V --- CHANGE 2: FILTER TABLE BY DEEPCRE POS --- V V V ---
+            if deepcre_pos_str != "N/A":
+                preliminary_motifs_table.append({
+                    'id': motif_id,
+                    'logo_fwd': fwd_logo_for_display,
+                    'logo_rev': rev_logo_for_display,
+                    'range_plot': image_to_base64(range_plot_path),
+                    'importance': importance_score,
+                    'position': f"{row['gen_mstart']}-{row['gen_mend']}",
+                    'deepcre_pos': deepcre_pos_str,
+                    'strand': row['strand'],
+                    'matches': matches
+                })
+            # --- ^ ^ ^ --- END OF CHANGE 2 --- ^ ^ ^ ---
 
-        # --- 6. Generate and Save HTML file ---
+        # --- V V V --- CHANGE 3: DE-DUPLICATE TABLE --- V V V ---
+        print(f"Found {len(preliminary_motifs_table)} motif occurrences in deepCRE regions.")
+        
+        if preliminary_motifs_table:
+            # Convert to DataFrame for easy filtering
+            table_df = pd.DataFrame(preliminary_motifs_table)
+            
+            # Sort by importance to prepare for de-duplication
+            table_df.sort_values('importance', ascending=False, inplace=True)
+            
+            # Keep only the top-scoring instance of each motif ID
+            final_table_df = table_df.drop_duplicates(subset=['id'], keep='first')
+            
+            # Sort the final table by genomic position for readability
+            # We must convert the 'position' string (e.g., "12345-12355") to an integer for sorting
+            try:
+                final_table_df['pos_int'] = final_table_df['position'].apply(lambda x: int(str(x).split('-')[0]))
+                final_table_df.sort_values('pos_int', inplace=True)
+                final_table_df.drop(columns=['pos_int'], inplace=True)
+            except Exception as e:
+                print(f"Warning: Could not sort final table by position. {e}")
+            
+            print(f"Filtering table to {len(final_table_df)} unique, top-scoring motifs.")
+            
+            # Add the final, processed list to the report data
+            report_data['motifs_table'] = final_table_df.to_dict('records')
+        else:
+            print("No motifs found within deepCRE regions for the table.")
+            report_data['motifs_table'] = [] # Ensure it's an empty list
+        # --- ^ ^ ^ --- END OF CHANGE 3 --- ^ ^ ^ ---
+
+
+        # --- 7. Generate and Save HTML file ---
         output_path = os.path.join(output_dir, f"{target_gene_id}_moca_report.html")
         generate_html_report(report_data, output_path)
 
