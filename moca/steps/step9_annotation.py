@@ -137,12 +137,18 @@ def run(config, common_settings):
             ), desc="Processing Chunks"):
                 if occ_chunk.empty: continue
 
-                # FIX: No pre-filtering is done here. All motifs are processed.
-                # The annotation step will determine if a motif is intragenic or in a flank.
+                # FIX: Standardize the 'loc' column to match the GFF's merge_key format
+                # 1. Split 'loc' into its 'chr' and 'coordinate' parts
+                loc_parts = occ_chunk['loc'].str.split(':', n=1, expand=True)
                 
-                # Annotate the chunk by merging with GFF data
-                occ_chunk['merge_key'] = occ_chunk['loc']
-                merged_chunk = pd.merge(occ_chunk, gene_annot_df, on='merge_key', how='inner')
+                # 2. Standardize the 'chr' part (loc_parts[0]) using the same function as the GFF
+                standardized_chr = _standardize_chr_name(loc_parts[0])
+                
+                # 3. Re-assemble the merge_key
+                occ_chunk['merge_key'] = standardized_chr + ':' + loc_parts[1]
+                # --- End Fix ---
+                
+                merged_chunk = pd.merge(occ_chunk, gene_annot_df, on='merge_key', how='inner')
                 if merged_chunk.empty: continue
 
                 processed_chunks.append(merged_chunk)
