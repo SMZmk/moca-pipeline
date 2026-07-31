@@ -116,12 +116,122 @@ Saliency: (Optional) Visualizes saliency maps for specific genes.
 
 Clustering: Performs hierarchical clustering of your motifs and generates a dendrogram.
 
-Ranging: Analyzes the positional distribution of motifs and calculates statistics relative to the TSS and TTS.
+Ranging: Analyzes the positional distribution of motifs and calculates statistics relative to the TSS and TTS. Places both halves of the model input on one axis and records the frame in `<spec><model>-ranging_geometry.json`.
 
 Projection: Maps your motifs to a reference genome using the external blamm tool (https://github.com/biointec/blamm).
 
-Annotation: Merges the motif occurrences with a GFF/GTF file to annotate which motifs fall within which gene regions.
+Annotation: Merges the motif occurrences with a GFF/GTF file to annotate which motifs fall within which gene regions, and applies the per-EPM positional filters. See "Positional filtering".
 
 Browser Viz: Generates a comprehensive, interactive HTML report for specific genes, combining a JBrowse-like gene model with a detailed summary table.
 
 Performance: (Optional) Evaluates the predictive performance of your motifs against gene expression data.
+
+## Positional filtering
+
+The positional filter is **per EPM and per region** — each EPM has its own band, learned from where
+deepCRE recognises it. There is no shared window: on a 48-EPM Arabidopsis model the q10–q90 bands range
+from 150 to 831 bp wide, and no single position in the window is accepted by all EPMs.
+
+Ranging places both halves of the model input on one axis: `1` = outer edge of the flank,
+`upstream_len + 1` = the gene border (TSS or TTS), up to `upstream_len + body_len` = `body_len` into the
+transcript. Annotation converts each BLAMM hit into that same frame, so thresholds and hits are always
+directly comparable. Ranging writes the frame to `<spec><model>-ranging_geometry.json`, and annotation
+reads it rather than assuming it.
+
+Window geometry is configurable for non-vanilla deepCRE setups and for phytoExpr. Defaults are deepCRE
+vanilla — 1000 bp upstream of the TSS + 500 bp into the transcript, a 20 bp N spacer, then 500 bp from the
+transcript 3' end + 1000 bp downstream of the TTS, totalling 3020 bp. Existing configs that omit the
+`window:` and `annotation.filters:` blocks keep working on these defaults.
+
+```yaml
+window:
+  upstream_len: 1000
+  body_len: 500
+  spacer: 20
+
+annotation:
+  dedupe: true              # collapse the 2x F/R redundancy, keyed on (gene, position, epm)
+  deep_intragenic: drop     # drop | pass  — hits deeper than body_len from either border
+  filters:
+    band: q1q9              # none | minmax | q1q9
+    weight_region:
+      enabled: true
+      min_region_fraction: 0.15
+    min_region_seqlets: 20
+  strict_merge:
+    min_match_rate: 0.5
+```
+
+**`band`** is the per-EPM plausibility test. Note it is *shape-adaptive* rather than a dispersion filter:
+the inner 80% of a broad seqlet distribution is a broad band, so retention scales with band width
+(Spearman 0.72 — the narrowest quartile of bands retains ~13% of in-scope hits, the widest ~45%). Broad
+bands are genuine signal, reflecting EPMs deepCRE recognises over a wide region, so they are not penalised.
+
+**`weight_region`** is the abundance gate, and the one that removes poorly supported EPMs. Across five runs
+it lifted the minimum retained band width from 0 bp to 120–143 bp while leaving the median and the broad
+tail untouched, and raised median seqlet support by 15–40%, at a cost of 2.5–4.3 percentage points of
+occurrences. A band built from a single seqlet has `q10 == q90`, i.e. a width of one base pair; these are
+what it removes.
+
+**`min_region_seqlets`** is an absolute floor, since `weight_region` is relative and misses EPMs that are
+rare in both regions.
+
+**`strict_merge.min_match_rate`** aborts the run if too few in-range occurrences match a gene key from
+`reference_gff`, guarding against silently annotating a fraction of the data when the GFF build does not
+match the one the projection was scanned against.
+
+`iqr` and `sd` remain in the ranging output as descriptive columns but are deliberately not filters. `iqr`
+*is* `q90 - q10`, so filtering on it removes the broadest bands — the opposite of the intent — and leaves
+the degenerate zero-width bands untouched.
+
+Annotation writes `annotation_report.json` with the geometry, filter settings, GFF match rate, the full
+filter cascade and every dropped band, so a run stays auditable afterwards.
+
+## Corrections in the positional filter
+
+The annotation step previously computed `dist_transc_border` as a distance measured **outward from the gene
+border**, domain `[0, flank_size]`, and compared it directly against `q10`/`q90` — which ranging expresses
+in a frame where the gene border sits at ~1000 and each EPM's preferred range typically runs 1000–1490,
+i.e. **inside** the transcript. The two frames are mirrored and offset.
+
+Measured across six runs (three model tags, five target genomes, self- and cross-species projection):
+
+- `q10` exceeded the flank width for 20–36 of every ~50 EPMs per region, making their bands unreachable
+- **45–60 of 58–111 EPM×region pairs retained exactly zero hits** — annihilated, not thinned
+- 88–97% of hits, everything classified `intragenic`, bypassed the filter entirely
+- flank retention was 1.3–9.9%, against 18.0–49.6% once the frame is corrected
+
+Annotation now places each hit into the ranging frame rather than converting thresholds, which is also
+robust to chromosome-edge truncation of the extracted region. For the record the fault was **not** a
+missing `-1520` TTS offset: that offset belongs to an older ranging convention
+(`moca_blue/mo_ran/..._TSS-TTS.1.4.R`) and is correctly commented out in the modern reference scripts.
+Strand handling was correct throughout — gene strand and BLAMM strand are symmetric both in scope and
+after filtering in every run tested.
+
+Ranging fixes:
+
+- the TTS half was flipped with `sequence_length - start`, placing the TTS border at 1000 while the TSS
+  border sat at 1001; now `(sequence_length + 1) - start`, so both halves agree
+- the TTS range bound was `[1520, 3000]`, admitting one base of the N spacer and discarding the 20 most
+  distal downstream bases while the TSS half used its full 1500; now `[1521, 3020]`
+- `mode` is binned after the flip, so it shares the frame of every other column
+- `cv` is NaN-guarded (`sd` is undefined for single-seqlet patterns)
+
+Restored from the moca_blue reference (`mo_proj/mo_feat-filter.v3.x`), all config-driven: nearest-border
+assignment so no hit is assigned to both borders in a short gene; the in-scope pre-filter, now applied per
+chunk *before* the GFF merge, which also fixes the previous concat-then-filter memory profile;
+deduplication; and `weight_region`.
+
+The legacy `word_size` gate was deliberately **not** restored. BLAMM emits exactly one span per EPM variant
+(verified: 0 of 100 and 0 of 112 EPMs across two runs show more than one), so it never removed partial
+matches — its real effect was rejecting border-straddling hits, which nearest-border assignment now
+handles directly.
+
+Further fixes: `flank_size` is read from config instead of a hardcoded constant, and the run aborts if it
+is smaller than `window.upstream_len` (a config setting 1500 previously produced a silent empty result,
+because the merge key could never match); the gene key reproduces the projection step's
+`max(1, start - flank)` clamp, so genes near a chromosome start no longer lose hits silently; dedupe
+orders the forward CWM first so the surviving `epm_instance` and `strand` are deterministic; BED output is
+0-based half-open (`chromStart` was previously the 1-based coordinate); and `epm` is the canonical
+identifier column, with `epm_instance` carrying the F/R suffix and `cwm_strand` recording which CWM
+orientation matched.
