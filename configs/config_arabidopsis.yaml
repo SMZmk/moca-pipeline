@@ -7,6 +7,16 @@ model_tag: "S0"
 # This global setting tells all downstream steps to use the trimmed motif file.
 use_trimmed_motifs: true
 
+# --- Model input geometry ---
+# Defaults are deepCRE vanilla: 1000 bp upstream of the TSS + 500 bp into the transcript,
+# a 20 bp N spacer, then 500 bp from the transcript 3' end + 1000 bp downstream of the TTS
+# = 3020 bp. Change these for other deepCRE setups or for phytoExpr; sequence_length is
+# derived and validated. Omitting this block entirely uses the defaults shown.
+window:
+  upstream_len: 1000
+  body_len: 500
+  spacer: 20
+
 # --- Pipeline Steps ---
 # Set 'run: true' to execute a step, 'run: false' to skip it.
 
@@ -61,6 +71,35 @@ projection:
 annotation:
   run: true
   reference_gff: "/home/ibg-4/Desktop/Rhome/moca/data/reference/arabidopsis_thaliana/Arabidopsis_thaliana.TAIR10.55.gff3"
+  chunk_size: 500000
+
+  # Collapse the 2x F/R redundancy: nomenclature emits both strand matrices and BLAMM scans
+  # with -rc, so each instance is reported twice. Keyed on (gene, position, epm) -- gene_id
+  # must stay in the key, because a position inside two overlapping gene+-flank windows
+  # legitimately annotates both genes.
+  dedupe: true
+
+  # Hits inside the transcript further than body_len from either border were never seen by
+  # the model. 'drop' excludes them; 'pass' appends them unfiltered, labelled deep_intragenic.
+  deep_intragenic: drop
+
+  write_out_of_scope: false
+
+  filters:
+    band: q1q9              # none | minmax | q1q9  -- per-EPM, per-region positional band
+    # Abundance gate: drops an EPM x region holding only a small share of that EPM's seqlets.
+    # These are the low-abundance, near-zero-width bands (one seqlet gives q10 == q90).
+    weight_region:
+      enabled: true
+      min_region_fraction: 0.15
+    # Absolute floor; weight_region is relative and misses EPMs that are rare in both regions.
+    min_region_seqlets: 20
+
+  strict_merge:
+    # Abort if fewer than this fraction of in-range occurrences match a gene key. Guards
+    # against silently annotating a few percent of the data when the GFF build does not
+    # match the one the projection was scanned against.
+    min_match_rate: 0.5
 
 browser_viz:
   run: true
